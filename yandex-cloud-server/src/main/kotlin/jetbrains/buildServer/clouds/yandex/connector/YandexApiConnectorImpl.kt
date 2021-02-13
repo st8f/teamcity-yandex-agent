@@ -24,6 +24,7 @@ import org.bouncycastle.util.io.pem.PemReader
 import yandex.cloud.access.Access
 import yandex.cloud.compute.v1.*
 import yandex.cloud.compute.v1.ImageServiceOuterClass.*
+import yandex.cloud.compute.v1.DiskServiceOuterClass.*
 import yandex.cloud.compute.v1.InstanceOuterClass.*
 import yandex.cloud.compute.v1.InstanceServiceOuterClass.*
 import yandex.cloud.endpoint.ApiEndpointServiceGrpc
@@ -138,6 +139,27 @@ class YandexApiConnectorImpl(accessKey: String) : YandexApiConnector {
             }
         }
 
+        var bootDiskSpec = AttachedDiskSpec.newBuilder()
+                .setAutoDelete(false)
+                .setMode(AttachedDiskSpec.Mode.READ_WRITE)
+                .setDiskSpec(AttachedDiskSpec.DiskSpec.newBuilder()
+                        .setImageId(image.id)
+                        .setSize(if (details.diskSize > 0) details.diskSize else image.minDiskSize)
+                        .apply {
+                            if (!details.diskType.isNullOrBlank()) {
+                                typeId = details.diskType
+                            }
+                        }
+                        .build())
+
+        val diskToReuse = findBootDiskToReuse(instanceFolder!!, image.id)
+        if (!diskToReuse.isNullOrEmpty()) {
+            bootDiskSpec = AttachedDiskSpec.newBuilder()
+                    .setAutoDelete(false)
+                    .setMode(AttachedDiskSpec.Mode.READ_WRITE)
+                    .setDiskId(diskToReuse)
+        }
+
         val request = CreateInstanceRequest.newBuilder()
                 .putAllLabels(mapOf(
                         "agent-image-id" to image.id,
@@ -156,19 +178,7 @@ class YandexApiConnectorImpl(accessKey: String) : YandexApiConnector {
                         .setCores(details.machineCores)
                         .setMemory(details.machineMemory))
                 .putAllMetadata(metadata)
-                .setBootDiskSpec(AttachedDiskSpec.newBuilder()
-                        .setAutoDelete(true)
-                        .setMode(AttachedDiskSpec.Mode.READ_WRITE)
-                        .setDiskSpec(AttachedDiskSpec.DiskSpec.newBuilder()
-                                .setImageId(image.id)
-                                .setSize(if (details.diskSize > 0) details.diskSize else image.minDiskSize)
-                                .apply {
-                                    if (!details.diskType.isNullOrBlank()) {
-                                        typeId = details.diskType
-                                    }
-                                }
-                                .build())
-                )
+                .setBootDiskSpec(bootDiskSpec)
                 .addNetworkInterfaceSpecs(NetworkInterfaceSpec.newBuilder()
                         .setSubnetId(details.subnet)
                         .setPrimaryV4AddressSpec(PrimaryAddressSpec.newBuilder()
@@ -340,6 +350,21 @@ class YandexApiConnectorImpl(accessKey: String) : YandexApiConnector {
         myProfileId = profileId
     }
 
+    private fun findBootDiskToReuse(folderID: String, sourceImageID: String): String? {
+        val disks = diskService.list(ListDisksRequest.newBuilder()
+                .setFolderId(folderID)
+                .build())
+                .get()
+        disks.disksList.forEach{
+            if (/*it.name.startsWith("tc-agent") &&*/
+                    it.sourceImageId == sourceImageID &&
+                    it.instanceIdsCount == 0) {
+                return it.id
+            }
+        }
+        return null
+    }
+
     private val operationService: OperationServiceGrpc.OperationServiceFutureStub by lazy {
         val channel = ManagedChannelBuilder.forTarget(endpoints["operation"]).build()
         OperationServiceGrpc.newFutureStub(channel).withCallCredentials(YandexCallCredentials())
@@ -368,6 +393,11 @@ class YandexApiConnectorImpl(accessKey: String) : YandexApiConnector {
     private val diskTypeService: DiskTypeServiceGrpc.DiskTypeServiceFutureStub by lazy {
         val channel = ManagedChannelBuilder.forTarget(endpoints["compute"]).build()
         DiskTypeServiceGrpc.newFutureStub(channel).withCallCredentials(YandexCallCredentials())
+    }
+
+    private val diskService: DiskServiceGrpc.DiskServiceFutureStub by lazy {
+        val channel = ManagedChannelBuilder.forTarget(endpoints["compute"]).build()
+        DiskServiceGrpc.newFutureStub(channel).withCallCredentials(YandexCallCredentials())
     }
 
     private val zoneService: ZoneServiceGrpc.ZoneServiceFutureStub by lazy {
